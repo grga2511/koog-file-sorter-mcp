@@ -1,86 +1,80 @@
 import ai.koog.agents.core.agent.AIAgent
 import ai.koog.agents.mcp.McpToolRegistryProvider
-import ai.koog.agents.mcp.fromProcess
-import ai.koog.prompt.executor.clients.google.GoogleModels
-import ai.koog.prompt.executor.llms.all.simpleGoogleAIExecutor
-import io.modelcontextprotocol.kotlin.sdk.types.Implementation
-import kotlinx.coroutines.runBlocking
-import java.nio.file.Path
 import ai.koog.http.client.ktor.KtorKoogHttpClient
+import ai.koog.prompt.executor.clients.google.GoogleLLMClient
+import ai.koog.prompt.executor.llms.MultiLLMPromptExecutor
 import io.ktor.client.HttpClient
 import io.ktor.client.engine.ProxyBuilder
+import io.ktor.client.plugins.sse.SSE
 import io.ktor.http.Url
+import kotlinx.coroutines.runBlocking
+import ai.koog.prompt.executor.clients.google.GoogleModels
+
 
 object FileSorterAgent {
     @JvmStatic
     fun main(args: Array<String>) = runBlocking<Unit> {
-        val apiKey = System.getenv("GOOGLE_API_KEY")
-            ?.takeIf { it.isNotBlank() }
-            ?: error("Set GOOGLE_API_KEY before running the agent.")
 
-        val server = startMcpServer()
+        val task = "Find the files containing the application configuration and return its name."
+
+        val mcpUrl = requiredEnv("MCP_URL")
+        val apiKey = requiredEnv("GOOGLE_API_KEY")
+        val modelId = requiredEnv("GEMINI_MODEL")
+        val proxyUrl = optionalEnv("GEMINI_PROXY_URL")
+        val systemPrompt = optionalEnv("AGENT_SYSTEM_PROMPT").orEmpty()
+
+        val mcpHttpClient = HttpClient {
+            install(SSE)
+        }
+
+        val geminiHttpClient = HttpClient {
+            if (proxyUrl != null) {
+                engine {
+                    proxy = ProxyBuilder.http(Url(proxyUrl))
+                }
+            }
+        }
 
         try {
-            val tools = McpToolRegistryProvider.fromProcess(
-                process = server,
-                clientInfo = Implementation("koog-file-sorter-mcp", "1.0.0")
+            val tools = McpToolRegistryProvider.streamableHttp {
+                url = mcpUrl
+                httpClient = mcpHttpClient
+            }
+
+            val googleClient = GoogleLLMClient(
+                apiKey = apiKey,
+                httpClientFactory = KtorKoogHttpClient.Factory(
+                    baseClient = geminiHttpClient
+                )
             )
 
-            val httpClient = HttpClient {
-                engine {
-                    proxy = ProxyBuilder.http(Url("http://192.168.255.60:8080"))
-                }
+            val model = when (modelId.removePrefix("models/")) {
+                "gemini-2.5-flash" -> GoogleModels.Gemini2_5Flash
+                "gemini-2.5-pro" -> GoogleModels.Gemini2_5Pro
+                else -> error("Unsupported Gemini model: $modelId")
             }
 
             val agent = AIAgent(
-                promptExecutor = simpleGoogleAIExecutor(
-                    apiKey = apiKey,
-                    httpClientFactory = KtorKoogHttpClient.Factory(baseClient = httpClient)
-                ),
-                llmModel = GoogleModels.Gemini2_5Flash,
+                promptExecutor = MultiLLMPromptExecutor(googleClient),
+                llmModel = model,
                 toolRegistry = tools,
-                systemPrompt = """
-                    Inspect the test project using the MCP tools.
-                    First call list_files. Then use read_text_file to verify
-                    which file contains application configuration.
-                    Do not infer the answer from the file name alone.
-                    Answer in the user's language.Answer only the question asked. 
-                    
-                """.trimIndent()
+                systemPrompt = systemPrompt
             )
 
             try {
-                println(agent.run(
-                    "Find file that has pdf extension of the app and tell me how it's named."
-                ))
-                println(agent.run(
-                    """
-                Pronađi datoteku koja sadrži konfiguracijske parametre aplikacije i reci mi kako se zove.
-                Najprije pozovi list_files, zatim pročitaj kandidata alatom read_text_file.
-                Kad potvrdiš da sadržaj uključuje konfiguracijske parametre, vrati samo naziv datoteke.
-                """
-                ))
+                println(agent.run(task))
             } finally {
                 agent.close()
-                httpClient.close()
             }
         } finally {
-            server.destroy()
+            geminiHttpClient.close()
+            mcpHttpClient.close()
         }
     }
 
-    private fun startMcpServer(): Process {
-        val javaExecutable = Path.of(
-            System.getProperty("java.home"), "bin", "java.exe"
-        )
+    private fun optionalEnv(name: String): String? =
+        System.getenv(name)?.trim()?.takeIf { it.isNotEmpty() }
 
-        return ProcessBuilder(
-            javaExecutable.toString(),
-            "-cp",
-            System.getProperty("java.class.path"),
-            "FileMcpServerKt"
-        )
-            .redirectError(ProcessBuilder.Redirect.INHERIT)
-            .start()
-    }
+    private fun requiredEnv(name: String): String =
+        optionalEnv(name) ?: error("Missing environment variable: $name")
 }
