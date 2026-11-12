@@ -2,20 +2,26 @@ import ai.koog.agents.core.agent.AIAgent
 import ai.koog.agents.mcp.McpToolRegistryProvider
 import ai.koog.http.client.ktor.KtorKoogHttpClient
 import ai.koog.prompt.executor.clients.google.GoogleLLMClient
+import ai.koog.prompt.executor.clients.google.GoogleModels
 import ai.koog.prompt.executor.llms.MultiLLMPromptExecutor
 import io.ktor.client.HttpClient
 import io.ktor.client.engine.ProxyBuilder
 import io.ktor.client.plugins.sse.SSE
 import io.ktor.http.Url
 import kotlinx.coroutines.runBlocking
-import ai.koog.prompt.executor.clients.google.GoogleModels
-
+import java.nio.file.Path
 
 object FileSorterAgent {
     @JvmStatic
     fun main(args: Array<String>) = runBlocking<Unit> {
+        val projectRoot = Path.of("")
+            .toAbsolutePath()
+            .normalize()
+            .toString()
 
-        val task = "Find the files containing the application configuration and return its name."
+        val directory = "Moretests"
+
+        val task = "Find the files containing application configuration and return their names."
 
         val mcpUrl = requiredEnv("MCP_URL")
         val apiKey = requiredEnv("GOOGLE_API_KEY")
@@ -62,7 +68,18 @@ object FileSorterAgent {
             )
 
             try {
-                println(agent.run(task))
+                val request = """
+                    Project root: $projectRoot
+                    Directory: $directory
+                    Task: $task
+
+                    Pass projectRoot and directory as separate arguments
+                    when calling list_files and read_text_file.
+                    The directory is relative to the project root.
+                    Read candidate files before deciding which ones match.
+                    """.trimIndent()
+
+                println(agent.run(request))
             } finally {
                 agent.close()
             }
